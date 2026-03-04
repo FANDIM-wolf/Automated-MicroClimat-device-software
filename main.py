@@ -4,11 +4,118 @@ import serial.tools.list_ports
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QTableWidget, QLabel,
     QLineEdit, QPushButton, QTableWidgetItem, QMessageBox, QHeaderView,
-    QInputDialog
+    QInputDialog, QTextEdit, QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime, timedelta
 from esp32_manager import ESP32Manager, TestESP32Manager
+
+
+class MonitorTab(QWidget):
+    """Вкладка мониторинга COM-порта"""
+    def __init__(self, esp32_manager):
+        super().__init__()
+        self.esp32 = esp32_manager
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        # Заголовок
+        title = QLabel("COM Port Monitor")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-weight: bold; font-size: 14pt;")
+        layout.addWidget(title)
+
+        # QTextEdit для вывода данных
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #aaa;
+                padding: 5px;
+                font-family: 'Courier New', monospace;
+                background-color: #f8f8f8;
+            }
+        """)
+        layout.addWidget(self.log_view)
+
+        # Панель отправки
+        send_layout = QHBoxLayout()
+        self.send_edit = QLineEdit()
+        self.send_edit.setPlaceholderText("Enter command (e.g. GET, SET GPIO1 1)")
+        self.send_edit.setStyleSheet("padding: 5px; font-size: 12pt;")
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setStyleSheet("""
+            padding: 6px 12px;
+            font-size: 12pt;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+        """)
+        send_layout.addWidget(self.send_edit)
+        send_layout.addWidget(self.send_btn)
+
+        layout.addLayout(send_layout)
+
+        self.setLayout(layout)
+
+        # Связь кнопки
+        self.send_btn.clicked.connect(self.send_command)
+
+        # Таймер для чтения сырых данных
+        self.read_timer = QTimer()
+        self.read_timer.timeout.connect(self.read_raw_data)
+        self.read_timer.start(100)  # каждые 100 мс
+
+    def read_raw_data(self):
+        """Чтение сырых данных из порта"""
+        if not self.esp32.is_connected():
+            return
+
+        try:
+            if hasattr(self.esp32, 'ser') and self.esp32.ser and self.esp32.ser.in_waiting:
+                raw = self.esp32.ser.readline()
+                try:
+                    text = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                    if text:
+                        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        self.log_view.append(f"[{timestamp}] ← {text}")
+                        self.log_view.verticalScrollBar().setValue(
+                            self.log_view.verticalScrollBar().maximum()
+                        )
+                except Exception as e:
+                    self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Decode error: {e}")
+        except Exception as e:
+            self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🔌 Read error: {e}")
+            self.esp32.connected = False
+
+    def send_command(self):
+        """Отправка команды в порт"""
+        cmd = self.send_edit.text().strip()
+        if not cmd:
+            return
+
+        if not self.esp32.is_connected():
+            QMessageBox.warning(self, "Error", "Not connected to ESP32")
+            return
+
+        try:
+            # Отправляем с \n
+            if hasattr(self.esp32, 'ser') and self.esp32.ser:
+                self.esp32.ser.write((cmd + '\n').encode('utf-8'))
+                self.esp32.ser.flush()
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                self.log_view.append(f"[{timestamp}] → {cmd}")
+                self.log_view.verticalScrollBar().setValue(
+                    self.log_view.verticalScrollBar().maximum()
+                )
+
+                # Очищаем поле
+                self.send_edit.clear()
+        except Exception as e:
+            self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Send error: {e}")
+            self.esp32.connected = False
 
 
 class MyApp(QWidget):
@@ -62,7 +169,27 @@ class MyApp(QWidget):
     def initUI(self):
         """Инициализация интерфейса"""
         self.setStyleSheet("font-family: Arial; background-color: white;")
-        main_layout = QHBoxLayout()
+        
+        # Создаём QTabWidget
+        self.tab_widget = QTabWidget()
+        self.tab_widget.addTab(self.create_data_tab(), "Data Collection")
+        self.monitor_tab = MonitorTab(self.esp32)
+        self.tab_widget.addTab(self.monitor_tab, "COM Monitor")
+
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.tab_widget)
+        self.setLayout(main_layout)
+
+        self.setWindowTitle('Data Processing App')
+        self.setGeometry(100, 100, 1000, 600)
+
+        self.refresh_connection_ui()
+        self.show()
+
+    def create_data_tab(self):
+        """Создание вкладки сбора данных"""
+        widget = QWidget()
+        layout = QHBoxLayout()
 
         # Левая часть — таблица данных
         left_layout = QVBoxLayout()
@@ -129,15 +256,10 @@ class MyApp(QWidget):
         self.save_btn.clicked.connect(self.save_clicked)
         self.clear_btn.clicked.connect(self.clear_clicked)
 
-        main_layout.addLayout(left_layout)
-        main_layout.addLayout(right_layout)
-        self.setLayout(main_layout)
-
-        self.setWindowTitle('Data Processing App')
-        self.setGeometry(100, 100, 1000, 600)
-
-        self.refresh_connection_ui()
-        self.show()
+        layout.addLayout(left_layout)
+        layout.addLayout(right_layout)
+        widget.setLayout(layout)
+        return widget
 
     def refresh_connection_ui(self):
         """Обновление индикации соединения на кнопках"""
