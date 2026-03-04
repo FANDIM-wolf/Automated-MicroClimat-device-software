@@ -50,8 +50,16 @@ void loop() {
     if (Serial.available()> 0){
         
         char in_data = Serial.read();
+
+        Serial.println(":");
+
        Serial.println(temp1);
+
+        Serial.println(",");
+
        Serial.println(temp2); 
+
+       Serial.println(";");
         
 
     }
