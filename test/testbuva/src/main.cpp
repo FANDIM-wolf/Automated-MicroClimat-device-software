@@ -46,7 +46,7 @@ void loop() {
 
     }
 
-
+    //Отправка данных в Serial
     if (Serial.available()> 0){
         
         char in_data = Serial.read();
