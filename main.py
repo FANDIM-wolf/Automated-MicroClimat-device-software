@@ -422,7 +422,7 @@ class MyApp(QWidget):
     def fetch_and_update_data(self):
         """
         Вызывается раз в интервал:
-        1. Отправляем команду GET
+        1. Отправляем команду G
         2. Читаем данные
         3. Добавляем строку в таблицу
         """
@@ -432,7 +432,7 @@ class MyApp(QWidget):
             return
 
         # Отправляем команду GET
-        if not self.esp32.send_command("GET"):
+        if not self.esp32.send_command("G"):
             print("❌ Failed to send GET command")
             return
 
