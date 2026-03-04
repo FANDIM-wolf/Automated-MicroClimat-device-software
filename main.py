@@ -1,28 +1,29 @@
 import sys
 import csv
 import serial.tools.list_ports
-
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QTableWidget, QLabel,
     QLineEdit, QPushButton, QTableWidgetItem, QMessageBox, QHeaderView,
     QInputDialog
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime, timedelta
-
-from timer_manager import TimerManager
 from esp32_manager import ESP32Manager, TestESP32Manager
 
 
 class MyApp(QWidget):
     def __init__(self):
         super().__init__()
-
         self.data_file = 'data_file.csv'
         self.datas_file = 'datas.csv'
-        self.data_timer = None
-        self.interval_seconds = 0
-        self.gpio_columns = set()
+        
+        # Единственный таймер для отправки команды по интервалу
+        self.main_timer = None
+        
+        # Параметры
+        self.interval_seconds = 0          # Интервал отправки команды GET
+        self.gpio_columns = set()           # Динамические столбцы с датчиками
+        self.latest_data = {}               # Последние полученные данные
 
         self.esp32 = self.initialize_esp32()
 
@@ -30,15 +31,15 @@ class MyApp(QWidget):
         self.load_csv_data(self.data_file)
 
     def initialize_esp32(self):
+        """Инициализация соединения с портом"""
         ports = serial.tools.list_ports.comports()
         available_ports = [port.device for port in ports]
 
-        # Всегда даём вариант TEST, чтобы можно было работать без железа
+        # Всегда даём вариант TEST
         items = ["TEST (no device)"] + available_ports
 
-        # Если портов вообще нет — сразу TEST
         if not available_ports:
-            return TestESP32Manager(baud_rate=115200)
+            return TestESP32Manager(baud_rate=9600)
 
         port, ok = QInputDialog.getItem(
             self,
@@ -54,15 +55,16 @@ class MyApp(QWidget):
             sys.exit(0)
 
         if port == "TEST (no device)":
-            return TestESP32Manager(baud_rate=115200)
+            return TestESP32Manager(baud_rate=9600)
 
-        return ESP32Manager(port=port, baud_rate=115200)
+        return ESP32Manager(port=port, baud_rate=9600)
 
     def initUI(self):
+        """Инициализация интерфейса"""
         self.setStyleSheet("font-family: Arial; background-color: white;")
         main_layout = QHBoxLayout()
 
-        # Left part - data table
+        # Левая часть — таблица данных
         left_layout = QVBoxLayout()
         self.table = QTableWidget()
         self.setup_table()
@@ -72,7 +74,7 @@ class MyApp(QWidget):
         left_layout.addWidget(left_label)
         left_layout.addWidget(self.table)
 
-        # Right part - control panel
+        # Правая часть — панель управления
         right_layout = QVBoxLayout()
         right_layout.setSpacing(15)
 
@@ -138,6 +140,7 @@ class MyApp(QWidget):
         self.show()
 
     def refresh_connection_ui(self):
+        """Обновление индикации соединения на кнопках"""
         connected = self.esp32.is_connected()
 
         self.apply_btn.setStyleSheet(f"""
@@ -159,6 +162,7 @@ class MyApp(QWidget):
         """)
 
     def setup_table(self):
+        """Настройка таблицы"""
         self.table.setStyleSheet("""
             QTableWidget{
                 border: 2px solid black;
@@ -188,6 +192,7 @@ class MyApp(QWidget):
         self.table.setHorizontalHeaderLabels(["Date", "Time"])
 
     def load_csv_data(self, filename='data_file.csv'):
+        """Загрузка данных из CSV файла"""
         try:
             with open(filename, 'r', encoding='utf-8') as file:
                 reader = csv.reader(file, delimiter=';')
@@ -223,6 +228,7 @@ class MyApp(QWidget):
             print(f"Error reading file: {e}")
 
     def save_data_to_file(self, filename=None):
+        """Сохранение данных в файл"""
         if filename is None:
             filename = self.datas_file
         try:
@@ -240,6 +246,7 @@ class MyApp(QWidget):
             print(f"Error saving file: {e}")
 
     def apply_clicked(self):
+        """Применение интервала"""
         try:
             time_str = self.time_edit.text().strip()
             if not time_str:
@@ -248,7 +255,7 @@ class MyApp(QWidget):
             t = datetime.strptime(time_str, "%H:%M:%S")
             self.interval_seconds = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second).total_seconds()
 
-            # убрать индикацию ошибки, если была
+            # убрать индикацию ошибки
             self.time_edit.setStyleSheet(self.time_edit.styleSheet().replace("border: 2px solid red;", ""))
 
             if not self.esp32.is_connected():
@@ -267,6 +274,7 @@ class MyApp(QWidget):
             self.time_edit.setStyleSheet(self.time_edit.styleSheet() + "border: 2px solid red;")
 
     def start_clicked(self):
+        """Запуск сбора данных"""
         if self.interval_seconds <= 0:
             QMessageBox.warning(self, "Error", "First set interval using 'Apply' button")
             return
@@ -277,43 +285,52 @@ class MyApp(QWidget):
                 self.refresh_connection_ui()
                 return
 
-        if self.data_timer:
-            self.data_timer.stop()
-            self.data_timer = None
+        # Останавливаем предыдущий таймер
+        self.stop_clicked()
 
-        self.data_timer = TimerManager(
-            interval_ms=int(self.interval_seconds * 1000),
-            callback=self.request_sensor_data
-        )
-        self.data_timer.start()
+        # Запускаем ЕДИНСТВЕННЫЙ таймер с интервалом
+        self.main_timer = QTimer()
+        self.main_timer.timeout.connect(self.fetch_and_update_data)
+        self.main_timer.start(int(self.interval_seconds * 1000))
 
         self.refresh_connection_ui()
-        QMessageBox.information(self, "Start", f"Data collection started. Interval: {self.interval_seconds} seconds")
+        QMessageBox.information(self, "Start",
+            f"Data collection started. Interval: {self.interval_seconds:.0f} seconds")
 
-    def request_sensor_data(self):
+    def fetch_and_update_data(self):
+        """
+        Вызывается раз в интервал:
+        1. Отправляем команду GET
+        2. Читаем данные
+        3. Добавляем строку в таблицу
+        """
+        # Автоматически проверяет и восстанавливает соединение
+        if not self.esp32.is_connected():
+            print("⚠️ Not connected — skipping fetch")
+            return
+
+        # Отправляем команду GET
+        if not self.esp32.send_command("GET"):
+            print("❌ Failed to send GET command")
+            return
+
+        # Читаем данные
         sensor_data = self.esp32.read_sensor_data()
 
-        if sensor_data is not None:
-            new_columns = False
-            for gpio in sensor_data.keys():
-                if gpio not in self.gpio_columns:
-                    self.gpio_columns.add(gpio)
-                    new_columns = True
+        if sensor_data is None:
+            print("⚠️ No data received from ESP32 after GET")
+            return
 
-            if new_columns:
-                self.update_table_headers()
+        # Обновляем столбцы при необходимости
+        new_columns = False
+        for gpio in sensor_data.keys():
+            if gpio not in self.gpio_columns:
+                self.gpio_columns.add(gpio)
+                new_columns = True
+        if new_columns:
+            self.update_table_headers()
 
-            self.add_data_to_table(sensor_data)
-            print(f"✅ Data added: {sensor_data}")
-        else:
-            print("⚠️  No data received from ESP32/Test")
-
-    def update_table_headers(self):
-        headers = ["Date", "Time"] + sorted(list(self.gpio_columns))
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-
-    def add_data_to_table(self, sensor_data):
+        # Формируем строку для таблицы
         now = datetime.now()
         date_str = now.strftime("%d.%m.%Y")
         time_str = now.strftime("%H:%M:%S")
@@ -322,28 +339,37 @@ class MyApp(QWidget):
         for gpio in sorted(self.gpio_columns):
             data_row.append(sensor_data.get(gpio, ""))
 
+        # Добавляем в таблицу
         row_position = self.table.rowCount()
         self.table.insertRow(row_position)
-
         for col, item in enumerate(data_row):
             self.table.setItem(row_position, col, QTableWidgetItem(str(item)))
 
         self.table.resizeColumnsToContents()
+        print(f"✅ Added row: {data_row}")
+
+    def update_table_headers(self):
+        """Обновление заголовков таблицы"""
+        headers = ["Date", "Time"] + sorted(list(self.gpio_columns))
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
 
     def stop_clicked(self):
-        if self.data_timer:
-            self.data_timer.stop()
-            self.data_timer = None
+        """Остановка сбора данных"""
+        if self.main_timer:
+            self.main_timer.stop()
+            self.main_timer = None
+        self.latest_data = {}
         QMessageBox.information(self, "Completion", "Data collection stopped")
 
     def save_clicked(self):
+        """Сохранение данных"""
         self.save_data_to_file()
         QMessageBox.information(self, "Save", "Data successfully saved")
 
     def clear_clicked(self):
-        if self.data_timer:
-            self.data_timer.stop()
-            self.data_timer = None
+        """Очистка таблицы"""
+        self.stop_clicked()
         self.table.setRowCount(0)
         self.gpio_columns = set()
         self.update_table_headers()
