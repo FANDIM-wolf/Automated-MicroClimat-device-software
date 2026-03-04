@@ -101,7 +101,6 @@ class MonitorTab(QWidget):
             return
 
         try:
-            # Отправляем с \n
             if hasattr(self.esp32, 'ser') and self.esp32.ser:
                 self.esp32.ser.write((cmd + '\n').encode('utf-8'))
                 self.esp32.ser.flush()
@@ -110,8 +109,6 @@ class MonitorTab(QWidget):
                 self.log_view.verticalScrollBar().setValue(
                     self.log_view.verticalScrollBar().maximum()
                 )
-
-                # Очищаем поле
                 self.send_edit.clear()
         except Exception as e:
             self.log_view.append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Send error: {e}")
@@ -128,9 +125,9 @@ class MyApp(QWidget):
         self.main_timer = None
         
         # Параметры
-        self.interval_seconds = 0          # Интервал отправки команды GET
-        self.gpio_columns = set()           # Динамические столбцы с датчиками
-        self.latest_data = {}               # Последние полученные данные
+        self.interval_seconds = 0
+        self.gpio_columns = set()
+        self.latest_data = {}
 
         self.esp32 = self.initialize_esp32()
 
@@ -142,7 +139,6 @@ class MyApp(QWidget):
         ports = serial.tools.list_ports.comports()
         available_ports = [port.device for port in ports]
 
-        # Всегда даём вариант TEST
         items = ["TEST (no device)"] + available_ports
 
         if not available_ports:
@@ -170,7 +166,6 @@ class MyApp(QWidget):
         """Инициализация интерфейса"""
         self.setStyleSheet("font-family: Arial; background-color: white;")
         
-        # Создаём QTabWidget
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self.create_data_tab(), "Data Collection")
         self.monitor_tab = MonitorTab(self.esp32)
@@ -191,7 +186,6 @@ class MyApp(QWidget):
         widget = QWidget()
         layout = QHBoxLayout()
 
-        # Левая часть — таблица данных
         left_layout = QVBoxLayout()
         self.table = QTableWidget()
         self.setup_table()
@@ -201,7 +195,6 @@ class MyApp(QWidget):
         left_layout.addWidget(left_label)
         left_layout.addWidget(self.table)
 
-        # Правая часть — панель управления
         right_layout = QVBoxLayout()
         right_layout.setSpacing(15)
 
@@ -344,7 +337,6 @@ class MyApp(QWidget):
                 self.table.resizeRowsToContents()
 
         except FileNotFoundError:
-            # файл может не существовать при первом запуске — это нормально
             pass
         except Exception as e:
             print(f"Error reading file: {e}")
@@ -377,7 +369,6 @@ class MyApp(QWidget):
             t = datetime.strptime(time_str, "%H:%M:%S")
             self.interval_seconds = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second).total_seconds()
 
-            # убрать индикацию ошибки
             self.time_edit.setStyleSheet(self.time_edit.styleSheet().replace("border: 2px solid red;", ""))
 
             if not self.esp32.is_connected():
@@ -407,10 +398,8 @@ class MyApp(QWidget):
                 self.refresh_connection_ui()
                 return
 
-        # Останавливаем предыдущий таймер
         self.stop_clicked()
 
-        # Запускаем ЕДИНСТВЕННЫЙ таймер с интервалом
         self.main_timer = QTimer()
         self.main_timer.timeout.connect(self.fetch_and_update_data)
         self.main_timer.start(int(self.interval_seconds * 1000))
@@ -419,33 +408,65 @@ class MyApp(QWidget):
         QMessageBox.information(self, "Start",
             f"Data collection started. Interval: {self.interval_seconds:.0f} seconds")
 
+    def round_value(self, value_str: str) -> str:
+        """
+        Округление значения до 2 знаков после запятой
+        Возвращает строку с округлённым значением
+        """
+        try:
+            # Преобразуем в float
+            value = float(value_str)
+            # Округляем до 2 знаков после запятой
+            rounded = round(value, 2)
+            # Возвращаем как строку
+            return str(rounded)
+        except (ValueError, TypeError):
+            # Если не удалось преобразовать — возвращаем исходное значение
+            return value_str
+
     def fetch_and_update_data(self):
         """
         Вызывается раз в интервал:
-        1. Отправляем команду G
-        2. Читаем данные
-        3. Добавляем строку в таблицу
+        1. Отправляем команду GET
+        2. Читаем и валидируем данные
+        3. Округляем значения до 2 знаков после запятой
+        4. Добавляем строку в таблицу (если данные валидны)
         """
-        # Автоматически проверяет и восстанавливает соединение
         if not self.esp32.is_connected():
             print("⚠️ Not connected — skipping fetch")
             return
 
-        # Отправляем команду GET
-        if not self.esp32.send_command("G"):
+        if not self.esp32.send_command("GET"):
             print("❌ Failed to send GET command")
             return
 
-        # Читаем данные
-        sensor_data = self.esp32.read_sensor_data()
+        # Читаем данные с валидацией
+        result = self.esp32.read_and_validate_sensor_data()
 
-        if sensor_data is None:
-            print("⚠️ No data received from ESP32 after GET")
+        if result is None:
+            print("⚠️ No data received from ESP32")
             return
+
+        # Проверяем, есть ли ошибки валидации
+        if "errors" in result:
+            # Формируем сообщение об ошибках
+            error_message = "Данные не прошли валидацию:\n\n" + "\n".join(result["errors"])
+            error_message += "\n\nДанные проигнорированы."
+            
+            # Показываем предупреждение пользователю
+            QMessageBox.warning(self, "⚠️ Данные отклонены", error_message)
+            print("⚠️ Data validation failed — row NOT added to table")
+            return
+
+        # Данные валидны — округляем значения
+        sensor_data = result
+        rounded_data = {}
+        for gpio, value_str in sensor_data.items():
+            rounded_data[gpio] = self.round_value(value_str)
 
         # Обновляем столбцы при необходимости
         new_columns = False
-        for gpio in sensor_data.keys():
+        for gpio in rounded_data.keys():
             if gpio not in self.gpio_columns:
                 self.gpio_columns.add(gpio)
                 new_columns = True
@@ -459,7 +480,7 @@ class MyApp(QWidget):
 
         data_row = [date_str, time_str]
         for gpio in sorted(self.gpio_columns):
-            data_row.append(sensor_data.get(gpio, ""))
+            data_row.append(rounded_data.get(gpio, ""))
 
         # Добавляем в таблицу
         row_position = self.table.rowCount()

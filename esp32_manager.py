@@ -1,12 +1,93 @@
 import time
 import re
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 
 try:
     import serial
 except Exception:
     serial = None
+
+
+class DataValidator:
+    """Упрощённый валидатор данных: проверка скачков и зависания"""
+    
+    def __init__(self, window_size: int = 5):
+        self.history: Dict[str, List[Tuple[float, float]]] = {}  # {gpio: [(timestamp, value)]}
+        self.window_size = window_size
+        self.max_rate_change = 10.0  # макс. изменение в секунду
+        self.stale_threshold = 30.0   # секунд без изменений = зависание
+        self.min_change_threshold = 0.5  # минимальное изменение для "живого" датчика
+
+    def add_reading(self, gpio: str, value: float, timestamp: float = None):
+        """Добавление нового показания в историю"""
+        if timestamp is None:
+            timestamp = time.time()
+        
+        if gpio not in self.history:
+            self.history[gpio] = []
+        
+        self.history[gpio].append((timestamp, value))
+        
+        # Ограничиваем размер истории
+        if len(self.history[gpio]) > self.window_size:
+            self.history[gpio].pop(0)
+
+    def validate(self, gpio: str, value: float) -> Tuple[bool, str]:
+        """
+        Валидация значения
+        Возвращает: (валидно, сообщение об ошибке)
+        """
+        # 1. Проверка формата (уже сделана до вызова)
+        
+        # 2. Проверка скорости изменения (резкие скачки)
+        is_valid, msg = self._check_rate_change(gpio, value)
+        if not is_valid:
+            return False, msg
+        
+        # 3. Проверка на зависание
+        is_valid, msg = self._check_stability(gpio, value)
+        if not is_valid:
+            return False, msg
+        
+        return True, "✅ Данные корректны"
+
+    def _check_rate_change(self, gpio: str, value: float) -> Tuple[bool, str]:
+        """Проверка скорости изменения (резкие скачки)"""
+        if gpio not in self.history or len(self.history[gpio]) < 2:
+            return True, ""  # Недостаточно данных для проверки
+        
+        # Берём последнее значение
+        last_time, last_value = self.history[gpio][-1]
+        current_time = time.time()
+        
+        time_diff = current_time - last_time
+        if time_diff <= 0:
+            time_diff = 0.1  # избегаем деления на ноль
+        
+        rate_change = abs(value - last_value) / time_diff
+        
+        if rate_change > self.max_rate_change:
+            return False, f"⚠️ Резкий скачок: {rate_change:.1f} ед/сек (макс. {self.max_rate_change})"
+        
+        return True, ""
+
+    def _check_stability(self, gpio: str, value: float) -> Tuple[bool, str]:
+        """Проверка на зависание датчика"""
+        if gpio not in self.history or len(self.history[gpio]) < 2:
+            return True, ""
+        
+        # Проверяем, не завис ли датчик (значение не меняется)
+        last_value = self.history[gpio][-1][1]
+        if abs(value - last_value) < self.min_change_threshold:
+            # Проверяем, как долго значение не меняется
+            first_stable_time = self.history[gpio][0][0]
+            current_time = time.time()
+            
+            if current_time - first_stable_time > self.stale_threshold:
+                return False, f"⚠️ Датчик завис: значение не меняется {self.stale_threshold} сек"
+        
+        return True, ""
 
 
 class ESP32Manager:
@@ -17,9 +98,10 @@ class ESP32Manager:
         self.ser = None
         self.connected = False
         self.last_connect_attempt = 0.0
-        self.reconnect_delay = 2.0  # секунды между попытками
+        self.reconnect_delay = 2.0
         self.max_reconnect_attempts = 5
         self.attempt_count = 0
+        self.validator = DataValidator(window_size=5)  # Валидатор данных
         self.connect()
 
     def connect(self) -> bool:
@@ -62,27 +144,20 @@ class ESP32Manager:
         return self.connected and self.ser is not None and self.ser.is_open
 
     def ensure_connection(self) -> bool:
-        """
-        Автоматическое восстановление соединения при разрыве.
-        Проверяет соединение и при необходимости пытается переподключиться.
-        """
-        # Если соединение активно — возвращаем сразу
+        """Автоматическое восстановление соединения"""
         if self.is_connected():
             return True
 
         current_time = time.time()
         
-        # Проверяем, не слишком ли рано пытаться переподключиться
         if current_time - self.last_connect_attempt < self.reconnect_delay:
             return False
 
-        # Увеличиваем счётчик попыток
         self.attempt_count += 1
         
-        # Если превышено максимальное количество попыток — сдаёмся
         if self.attempt_count > self.max_reconnect_attempts:
             print("⚠️ Max reconnect attempts reached. Waiting longer...")
-            self.reconnect_delay = 30.0  # увеличиваем задержку до 30 секунд
+            self.reconnect_delay = 30.0
             self.last_connect_attempt = current_time
             return False
 
@@ -92,19 +167,15 @@ class ESP32Manager:
         
         if success:
             print("✅ Reconnected successfully")
-            self.reconnect_delay = 2.0  # сбрасываем задержку
+            self.reconnect_delay = 2.0
         else:
-            # Экспоненциальная задержка между попытками (максимум 30 секунд)
             self.reconnect_delay = min(self.reconnect_delay * 1.5, 30.0)
             self.last_connect_attempt = current_time
         
         return success
 
     def send_command(self, cmd: str) -> bool:
-        """
-        Отправка команды на ESP32 (например, "GET")
-        Автоматически проверяет и восстанавливает соединение
-        """
+        """Отправка команды на ESP32"""
         if not self.ensure_connection():
             print(f"❌ Cannot send command '{cmd}': no connection")
             return False
@@ -121,14 +192,7 @@ class ESP32Manager:
             return False
 
     def read_sensor_data(self) -> Optional[Dict[str, str]]:
-        """
-        Чтение данных с датчиков после отправки команды GET.
-        Формат данных от ESP32:
-          :
-          gpio 1 123
-          gpio 2 456
-          ;
-        """
+        """Чтение данных с датчиков"""
         if not self.ensure_connection():
             print("❌ Cannot read data: no connection")
             return None
@@ -177,47 +241,87 @@ class ESP32Manager:
 
         return sensor_data if sensor_data else None
 
+    def read_and_validate_sensor_data(self) -> Optional[Dict[str, str]]:
+        """
+        Чтение данных с валидацией:
+        - Проверка формата
+        - Проверка резких скачков
+        - Проверка на зависание
+        Возвращает только валидные данные или список ошибок
+        """
+        raw_data = self.read_sensor_data()
+        
+        if raw_data is None:
+            return None
+        
+        validated_data = {}
+        errors = []
+        
+        for gpio, value_str in raw_data.items():
+            try:
+                # Проверка формата данных
+                value = float(value_str)
+                
+                # Валидация
+                is_valid, message = self.validator.validate(gpio, value)
+                
+                if is_valid:
+                    # Округляем до 2 знаков после запятой
+                    rounded_value = round(value, 2)
+                    validated_data[gpio] = str(rounded_value)
+                    self.validator.add_reading(gpio, value)
+                    print(f"✅ {gpio}: {rounded_value} - {message}")
+                else:
+                    error_msg = f"{gpio}: {value} - {message}"
+                    errors.append(error_msg)
+                    print(f"❌ {error_msg}")
+                    
+            except ValueError:
+                error_msg = f"{gpio}: Невозможно преобразовать '{value_str}' в число"
+                errors.append(error_msg)
+                print(f"❌ {error_msg}")
+        
+        # Если есть ошибки — возвращаем их
+        if errors:
+            return {"errors": errors}
+        
+        return validated_data if validated_data else None
+
 
 class TestESP32Manager:
-    """
-    Тестовый менеджер для работы без реального устройства
-    """
+    """Тестовый менеджер"""
     def __init__(self, baud_rate: int = 9600):
         self.baud_rate = baud_rate
         self.connected = True
         self._tick = 0
-        # Базовые значения
         self.frame = {
-            "GPIO1": 100,
-            "GPIO2": 200,
-            "GPIO3": 300,
-            "GPIO4": 400,
-            "GPIO5": 400,
-            "GPIO6": 423,
-            "GPIO7": 423,
+            "GPIO1": 100.0,
+            "GPIO2": 200.5,
+            "GPIO3": 300.75,
+            "GPIO4": 400.123,
+            "GPIO5": 400.999,
+            "GPIO6": 423.456,
+            "GPIO7": 423.001,
         }
-        self.simulate_disconnection = False  # для тестирования восстановления
+        self.simulate_disconnection = False
+        self.validator = DataValidator(window_size=5)
+        self.simulate_jump = False
+        self.jump_count = 0
 
     def connect(self) -> bool:
-        """Подключение (всегда успешно)"""
         self.connected = not self.simulate_disconnection
         if self.connected:
             print("✅ Test mode: connected")
         return self.connected
 
     def disconnect(self):
-        """Отключение"""
         self.connected = False
         print("🔌 Test mode: disconnected")
 
     def is_connected(self) -> bool:
-        """Проверка соединения"""
         return self.connected
 
     def ensure_connection(self) -> bool:
-        """
-        Восстановление соединения в тестовом режиме
-        """
         if not self.connected:
             print("🔄 Test mode: simulating reconnect...")
             self.connected = True
@@ -225,9 +329,6 @@ class TestESP32Manager:
         return self.connected
 
     def send_command(self, cmd: str) -> bool:
-        """
-        Отправка команды в тестовом режиме
-        """
         if not self.is_connected():
             print("⚠️ Test: not connected — command ignored")
             return False
@@ -236,20 +337,59 @@ class TestESP32Manager:
         return True
 
     def read_sensor_data(self) -> Optional[Dict[str, str]]:
-        """
-        Генерация тестовых данных
-        """
         if not self.is_connected():
             print("⚠️ Test: no connection — returning None")
             return None
 
         self._tick += 1
         
-        # Генерируем вариативные данные
+        # Для тестирования резких скачков
+        if self.simulate_jump and self._tick % 10 == 0:
+            self.jump_count += 1
+            if self.jump_count == 1:
+                print("💥 Simulating sharp jump on GPIO1...")
+                return {"GPIO1": "500.0", "GPIO2": "200.5"}
+        
         test_data = {}
         for gpio, base_value in self.frame.items():
-            variation = (self._tick % 5) - 2  # вариация от -2 до +2
+            variation = (self._tick % 5) - 2
             test_data[gpio] = str(base_value + variation)
         
         print(f"[TEST] Generated data: {test_data}")
         return test_data
+
+    def read_and_validate_sensor_data(self) -> Optional[Dict[str, str]]:
+        """Тестовая валидация данных"""
+        raw_data = self.read_sensor_data()
+        
+        if raw_data is None:
+            return None
+        
+        validated_data = {}
+        errors = []
+        
+        for gpio, value_str in raw_data.items():
+            try:
+                value = float(value_str)
+                is_valid, message = self.validator.validate(gpio, value)
+                
+                if is_valid:
+                    # Округляем до 3 знаков после запятой
+                    rounded_value = round(value, 3)
+                    validated_data[gpio] = str(rounded_value)
+                    self.validator.add_reading(gpio, value)
+                    print(f"✅ {gpio}: {rounded_value} - {message}")
+                else:
+                    error_msg = f"{gpio}: {value} - {message}"
+                    errors.append(error_msg)
+                    print(f"❌ {error_msg}")
+                    
+            except ValueError:
+                error_msg = f"{gpio}: Невозможно преобразовать '{value_str}' в число"
+                errors.append(error_msg)
+                print(f"❌ {error_msg}")
+        
+        if errors:
+            return {"errors": errors}
+        
+        return validated_data if validated_data else None
