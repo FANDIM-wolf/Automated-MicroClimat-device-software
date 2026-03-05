@@ -10,14 +10,12 @@ except Exception:
 
 
 class DataValidator:
-    """Упрощённый валидатор данных: проверка скачков и зависания"""
+    """Валидатор данных: проверка скачков"""
     
     def __init__(self, window_size: int = 5):
         self.history: Dict[str, List[Tuple[float, float]]] = {}  # {gpio: [(timestamp, value)]}
         self.window_size = window_size
         self.max_rate_change = 10.0  # макс. изменение в секунду
-        self.stale_threshold = 30.0   # секунд без изменений = зависание
-        self.min_change_threshold = 0.5  # минимальное изменение для "живого" датчика
 
     def add_reading(self, gpio: str, value: float, timestamp: float = None):
         """Добавление нового показания в историю"""
@@ -38,15 +36,8 @@ class DataValidator:
         Валидация значения
         Возвращает: (валидно, сообщение об ошибке)
         """
-        # 1. Проверка формата (уже сделана до вызова)
-        
-        # 2. Проверка скорости изменения (резкие скачки)
+        # Проверка скорости изменения (резкие скачки)
         is_valid, msg = self._check_rate_change(gpio, value)
-        if not is_valid:
-            return False, msg
-        
-        # 3. Проверка на зависание
-        is_valid, msg = self._check_stability(gpio, value)
         if not is_valid:
             return False, msg
         
@@ -69,23 +60,6 @@ class DataValidator:
         
         if rate_change > self.max_rate_change:
             return False, f"⚠️ Резкий скачок: {rate_change:.1f} ед/сек (макс. {self.max_rate_change})"
-        
-        return True, ""
-
-    def _check_stability(self, gpio: str, value: float) -> Tuple[bool, str]:
-        """Проверка на зависание датчика"""
-        if gpio not in self.history or len(self.history[gpio]) < 2:
-            return True, ""
-        
-        # Проверяем, не завис ли датчик (значение не меняется)
-        last_value = self.history[gpio][-1][1]
-        if abs(value - last_value) < self.min_change_threshold:
-            # Проверяем, как долго значение не меняется
-            first_stable_time = self.history[gpio][0][0]
-            current_time = time.time()
-            
-            if current_time - first_stable_time > self.stale_threshold:
-                return False, f"⚠️ Датчик завис: значение не меняется {self.stale_threshold} сек"
         
         return True, ""
 
@@ -197,6 +171,11 @@ class ESP32Manager:
             print("❌ Cannot read data: no connection")
             return None
 
+        # Отправляем команду GET
+        if not self.send_command("GET"):
+            print("⚠️ Cannot send GET command")
+            return None
+
         # Ждём начало данных ':'
         start_time = time.time()
         while time.time() - start_time < self.timeout:
@@ -225,10 +204,10 @@ class ESP32Manager:
             print("⚠️ Timeout waiting for end marker ';'")
             return None
 
-        # Парсим данные
+        # Парсим данные - ПОДДЕРЖКА ЧИСЕЛ С ЗАПЯТЫМИ
         sensor_data = {}
         for line in data_lines:
-            match = re.match(r'gpio\s+(\d+)\s+(\d+)', line)
+            match = re.match(r'gpio\s+(\d+)\s+([\d,]+)', line)  # ИСПРАВЛЕНО: поддержка запятых
             if match:
                 gpio_num = match.group(1)
                 value = match.group(2)
@@ -246,7 +225,6 @@ class ESP32Manager:
         Чтение данных с валидацией:
         - Проверка формата
         - Проверка резких скачков
-        - Проверка на зависание
         Возвращает только валидные данные или список ошибок
         """
         raw_data = self.read_sensor_data()
@@ -259,20 +237,23 @@ class ESP32Manager:
         
         for gpio, value_str in raw_data.items():
             try:
-                # Проверка формата данных
-                value = float(value_str)
+                # Заменяем запятую на точку для преобразования в float
+                value_normalized = value_str.replace(',', '.')
+                value = float(value_normalized)
                 
                 # Валидация
                 is_valid, message = self.validator.validate(gpio, value)
                 
                 if is_valid:
-                    # Округляем до 2 знаков после запятой
-                    rounded_value = round(value, 2)
-                    validated_data[gpio] = str(rounded_value)
+                    # Округляем до 3 знаков после запятой
+                    rounded_value = round(value, 3)
+                    # Форматируем с запятой для отображения
+                    formatted_value = f"{rounded_value:.3f}".replace('.', ',')
+                    validated_data[gpio] = formatted_value
                     self.validator.add_reading(gpio, value)
-                    print(f"✅ {gpio}: {rounded_value} - {message}")
+                    print(f"✅ {gpio}: {formatted_value} - {message}")
                 else:
-                    error_msg = f"{gpio}: {value} - {message}"
+                    error_msg = f"{gpio}: {value_str} - {message}"
                     errors.append(error_msg)
                     print(f"❌ {error_msg}")
                     
@@ -353,7 +334,8 @@ class TestESP32Manager:
         test_data = {}
         for gpio, base_value in self.frame.items():
             variation = (self._tick % 5) - 2
-            test_data[gpio] = str(base_value + variation)
+            # Форматируем с запятой
+            test_data[gpio] = f"{base_value + variation:.3f}".replace('.', ',')
         
         print(f"[TEST] Generated data: {test_data}")
         return test_data
@@ -370,17 +352,21 @@ class TestESP32Manager:
         
         for gpio, value_str in raw_data.items():
             try:
-                value = float(value_str)
+                # Заменяем запятую на точку для преобразования в float
+                value_normalized = value_str.replace(',', '.')
+                value = float(value_normalized)
                 is_valid, message = self.validator.validate(gpio, value)
                 
                 if is_valid:
                     # Округляем до 3 знаков после запятой
                     rounded_value = round(value, 3)
-                    validated_data[gpio] = str(rounded_value)
+                    # Форматируем с запятой для отображения
+                    formatted_value = f"{rounded_value:.3f}".replace('.', ',')
+                    validated_data[gpio] = formatted_value
                     self.validator.add_reading(gpio, value)
-                    print(f"✅ {gpio}: {rounded_value} - {message}")
+                    print(f"✅ {gpio}: {formatted_value} - {message}")
                 else:
-                    error_msg = f"{gpio}: {value} - {message}"
+                    error_msg = f"{gpio}: {value_str} - {message}"
                     errors.append(error_msg)
                     print(f"❌ {error_msg}")
                     
