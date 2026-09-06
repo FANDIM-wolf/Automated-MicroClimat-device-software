@@ -356,7 +356,7 @@ class MyApp(QWidget):
                     self.handle_connection_lost()
                     
         except Exception as e:
-            print(f"❌ Error during update: {e}")
+            print(f" Error during update: {e}")
             self.handle_connection_lost()
 
     def update_statistics(self, gpio):
@@ -386,7 +386,7 @@ class MyApp(QWidget):
         self.stats_labels[gpio].setText(stats_text)
 
     def handle_connection_lost(self):
-        print("⚠️ Connection lost! Stopping...")
+        print(" Connection lost! Stopping...")
         self.stop_data_collection()
         self.refresh_connection_ui()
         
@@ -405,7 +405,7 @@ class MyApp(QWidget):
             if self.was_collecting:
                 self.start_clicked()
         else:
-            print("❌ Reconnection failed. Retrying...")
+            print(" Reconnection failed. Retrying...")
 
     def stop_data_collection(self):
         if self.table_update_timer:
