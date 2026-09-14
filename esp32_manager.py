@@ -86,10 +86,10 @@ class ESP32Manager:
             self.ser.reset_output_buffer()
 
             self.connected = True
-            print(f"✅ Connected to ESP32 on {self.port}")
+            print(f" Connected to ESP32 on {self.port}")
             return True
         except Exception as e:
-            print(f"❌ Connection error: {e}")
+            print(f" Connection error: {e}")
             self.connected = False
             return False
 
@@ -99,7 +99,7 @@ class ESP32Manager:
                 self.ser.close()
         finally:
             self.connected = False
-            print("🔌 ESP32 disconnected")
+            print("ESP32 disconnected")
 
     def is_connected(self) -> bool:
         return self.connected and self.ser is not None and self.ser.is_open
@@ -113,7 +113,7 @@ class ESP32Manager:
             self.ser.flush()
             return True
         except Exception as e:
-            print(f"❌ Send command failed: {e}")
+            print(f" Send command failed: {e}")
             self.connected = False
             return False
 
@@ -132,7 +132,7 @@ class ESP32Manager:
                     break
             time.sleep(0.01)
         else:
-            print("⚠️ Timeout waiting for ':'")
+            print(" Timeout waiting for ':'")
             return None
 
         data_lines = []
@@ -146,7 +146,7 @@ class ESP32Manager:
                     data_lines.append(line)
             time.sleep(0.01)
         else:
-            print("⚠️ Timeout waiting for ';'")
+            print(" Timeout waiting for ';'")
             return None
 
         validated_data = {}
@@ -165,7 +165,7 @@ class ESP32Manager:
                     val_float = float(value_str.replace(',', '.'))
                     
                     if val_float == 85.0 or val_float <= -100.0:
-                        print(f"❌ {gpio_name}: Аппаратная ошибка датчика ({val_float})")
+                        print(f" {gpio_name}: Аппаратная ошибка датчика ({val_float})")
                         validated_data[gpio_name] = "ERR"
                     else:
                         rounded = round(val_float, 3)
@@ -176,7 +176,7 @@ class ESP32Manager:
                         print(f"📈 {gpio_name}: {val_float} °C (Скорость: {rate} °C/сек)")
                         
                 except ValueError:
-                    print(f"❌ {gpio_name}: Ошибка парсинга ({value_str})")
+                    print(f" {gpio_name}: Ошибка парсинга ({value_str})")
                     validated_data[gpio_name] = "ERR"
 
         for gpio in self.known_gpios:
